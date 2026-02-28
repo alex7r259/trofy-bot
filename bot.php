@@ -8,6 +8,7 @@ class TelegramEventBot {
     private $logFile;
     private $incomingLogFile;
     private $errorLogFile;
+    private $storedFilesJson;
     public string $uploadsDir;
     
     public function __construct() {
@@ -17,6 +18,7 @@ class TelegramEventBot {
         $this->logFile = LOG_FILE;
         $this->incomingLogFile = INCOMING_LOG_FILE;
         $this->errorLogFile = ERROR_LOG_FILE;
+        $this->storedFilesJson = STORED_FILES_JSON;
         $this->uploadsDir = __DIR__ . '/uploads';
         
         // Инициализируем файл обработанных событий если его нет
@@ -27,6 +29,11 @@ class TelegramEventBot {
         // Создаем директорию для загрузок если не существует
         if (!file_exists($this->uploadsDir)) {
             mkdir($this->uploadsDir, 0755, true);
+        }
+
+        // Инициализируем хранилище ссылок на Telegram-файлы
+        if (!file_exists($this->storedFilesJson)) {
+            file_put_contents($this->storedFilesJson, json_encode([], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
         }
     }
     
@@ -132,30 +139,36 @@ class TelegramEventBot {
             return false;
         }
         
-        // Сохраняем файл
-        $savedPath = $this->saveTelegramFile($fileId, $fileName ?? null);
+        // Сохраняем только ссылку на Telegram file_id (без скачивания)
+        $savedFile = $this->saveTelegramFileReference([
+            'file_id' => $fileId,
+            'file_unique_id' => $photo['file_unique_id'] ?? $document['file_unique_id'] ?? $video['file_unique_id'] ?? $audio['file_unique_id'] ?? $voice['file_unique_id'] ?? null,
+            'file_name' => $fileName ?? null,
+            'type' => $fileType,
+            'caption' => $caption,
+            'chat_id' => $chatId,
+            'user_id' => $userId,
+            'user_name' => $userName
+        ]);
         
-        if ($savedPath) {
-            $this->writeLog("File uploaded by $userName (ID: $userId) in chat $chatId: $savedPath", 'INFO');
+        if ($savedFile) {
+            $this->writeLog("File reference saved by $userName (ID: $userId) in chat $chatId: {$savedFile['record_id']}", 'INFO');
             
             // Отправляем подтверждение пользователю
-            $response = "✅ Файл сохранен!\n";
+            $response = "✅ Файл сохранен в каталоге (без скачивания)!\n";
+            $response .= "🆔 ID записи: {$savedFile['record_id']}\n";
             $response .= "📁 Тип: $fileType\n";
-            $response .= "📝 Путь: " . basename($savedPath) . "\n";
-            $response .= "💾 Размер: " . $this->formatBytes(filesize($savedPath)) . "\n";
+            if (!empty($savedFile['file_name'])) {
+                $response .= "📝 Имя: {$savedFile['file_name']}\n";
+            }
+            $response .= "🔑 Telegram file_id: `{$savedFile['file_id']}`\n";
             if (!empty($caption)) {
                 $response .= "📋 Подпись: $caption";
             }
             
-            $this->sendMessage($chatId, $response);
+            $this->sendMessage($chatId, $response, 'Markdown');
             
-            return [
-                'path' => $savedPath,
-                'type' => $fileType,
-                'caption' => $caption,
-                'chat_id' => $chatId,
-                'user_id' => $userId
-            ];
+            return $savedFile;
         }
         
         return false;
@@ -1453,57 +1466,144 @@ class TelegramEventBot {
 }
 
 /**
- * Получение списка локальных файлов
+ * Получение списка сохраненных Telegram file_id
  */
 public function getLocalFiles() {
-    
-    if (!file_exists($this->uploadsDir)) {
-        mkdir($this->uploadsDir, 0755, true);
+    return $this->getStoredFiles();
+}
+
+/**
+ * Сохранение ссылки на Telegram-файл
+ */
+private function saveTelegramFileReference($fileData) {
+    $files = $this->loadStoredFiles();
+
+    $nextId = 1;
+    if (!empty($files)) {
+        $ids = array_column($files, 'record_id');
+        $nextId = max($ids) + 1;
     }
 
-    $result = [];
+    $record = [
+        'record_id' => $nextId,
+        'file_id' => $fileData['file_id'],
+        'file_unique_id' => $fileData['file_unique_id'] ?? null,
+        'file_name' => $fileData['file_name'] ?? null,
+        'type' => $fileData['type'] ?? 'document',
+        'caption' => $fileData['caption'] ?? '',
+        'chat_id' => $fileData['chat_id'] ?? null,
+        'user_id' => $fileData['user_id'] ?? null,
+        'user_name' => $fileData['user_name'] ?? null,
+        'created_at' => date('Y-m-d H:i:s')
+    ];
 
-    $files = scandir($this->uploadsDir);
-    if ($files === false) {
+    $files[] = $record;
+
+    if (!$this->saveStoredFiles($files)) {
+        return false;
+    }
+
+    return $record;
+}
+
+private function loadStoredFiles() {
+    if (!file_exists($this->storedFilesJson)) {
         return [];
     }
 
-    foreach ($files as $file) {
-        if ($file === '.' || $file === '..') {
-            continue;
-        }
-
-        $path = $this->uploadsDir . '/' . $file;
-        if (!is_file($path)) {
-            continue;
-        }
-
-        $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
-        
-        if (in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp'])) {
-            $type = 'photo';
-        } elseif (in_array($ext, ['mp4', 'mov', 'avi', 'mkv'])) {
-            $type = 'video';
-        } elseif (in_array($ext, ['mp3', 'wav', 'ogg'])) {
-            $type = 'audio';
-        } else {
-            $type = 'document';
-        }
-
-        $result[] = [
-            'name' => $file,
-            'path' => $path,
-            'type' => $type,
-            'size' => filesize($path),
-            'size_formatted' => $this->formatBytes(filesize($path)),
-            'mtime' => filemtime($path),
-        ];
+    $content = file_get_contents($this->storedFilesJson);
+    if ($content === false || trim($content) === '') {
+        return [];
     }
 
-    // сортировка: новые сверху
-    usort($result, fn($a, $b) => $b['mtime'] <=> $a['mtime']);
+    $decoded = json_decode($content, true);
+    return is_array($decoded) ? $decoded : [];
+}
 
-    return $result;
+private function saveStoredFiles($files) {
+    $result = file_put_contents($this->storedFilesJson, json_encode($files, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+    return $result !== false;
+}
+
+public function getStoredFiles($type = null) {
+    $files = $this->loadStoredFiles();
+
+    if ($type !== null) {
+        $files = array_values(array_filter($files, fn($f) => ($f['type'] ?? null) === $type));
+    }
+
+    usort($files, fn($a, $b) => strtotime($b['created_at'] ?? '1970-01-01') <=> strtotime($a['created_at'] ?? '1970-01-01'));
+    return $files;
+}
+
+private function findStoredFile($recordId) {
+    $files = $this->loadStoredFiles();
+    foreach ($files as $file) {
+        if ((string)($file['record_id'] ?? '') === (string)$recordId) {
+            return $file;
+        }
+    }
+    return null;
+}
+
+public function sendStoredFileById($chatId, $recordId, $expectedType = null, $caption = '', $parseMode = 'Markdown', $replyToMessageId = null, $topicId = null) {
+    $file = $this->findStoredFile($recordId);
+    if (!$file) {
+        $this->writeLog("Stored file not found: $recordId", 'ERROR');
+        return ['ok' => false, 'description' => 'Файл с таким ID не найден'];
+    }
+
+    $type = $file['type'] ?? 'document';
+    if ($expectedType !== null && $type !== $expectedType) {
+        return ['ok' => false, 'description' => "Неверный тип файла. Ожидался $expectedType, найден $type"];
+    }
+
+    $fileId = $file['file_id'];
+    $finalCaption = $caption !== '' ? $caption : ($file['caption'] ?? '');
+
+    switch ($type) {
+        case 'photo':
+            return $this->sendPhoto($chatId, $fileId, $finalCaption, $parseMode, $replyToMessageId, $topicId);
+        case 'video':
+            return $this->sendVideo($chatId, $fileId, $finalCaption, $parseMode, $replyToMessageId, $topicId);
+        case 'audio':
+            return $this->sendAudio($chatId, $fileId, $finalCaption, $parseMode, $replyToMessageId, $topicId);
+        case 'voice':
+            return $this->sendVoice($chatId, $fileId, $finalCaption, $parseMode, $replyToMessageId, $topicId);
+        case 'sticker':
+            return $this->sendSticker($chatId, $fileId, $replyToMessageId, $topicId);
+        default:
+            return $this->sendDocument($chatId, $fileId, $finalCaption, $parseMode, $replyToMessageId, $topicId);
+    }
+}
+
+public function deleteLocalFile($recordId) {
+    $files = $this->loadStoredFiles();
+    $before = count($files);
+    $files = array_values(array_filter($files, fn($f) => (string)($f['record_id'] ?? '') !== (string)$recordId));
+
+    if ($before === count($files)) {
+        return false;
+    }
+
+    return $this->saveStoredFiles($files);
+}
+
+public function cleanupOldFiles($days = 7) {
+    $cutoff = time() - ($days * 86400);
+    $files = $this->loadStoredFiles();
+    $kept = [];
+
+    foreach ($files as $file) {
+        $createdAt = strtotime($file['created_at'] ?? '');
+        if ($createdAt !== false && $createdAt >= $cutoff) {
+            $kept[] = $file;
+        }
+    }
+
+    $deleted = count($files) - count($kept);
+    $this->saveStoredFiles($kept);
+    return $deleted;
 }
     
     

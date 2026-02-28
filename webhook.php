@@ -116,11 +116,11 @@ if (!empty($update) && isset($update['message'])) {
                 $response .= "/chats - Список чатов\n\n";
                 $response .= "*Отправка сообщений:*\n";
                 $response .= "/send_text*-*<chat_id>*-*<текст>*-*[topic_id] - Отправить текст\n";
-                $response .= "/send_local_photo <chat_id> <имя_файла> [caption] [topic_id] - Отправить фото\n";
-                $response .= "/send_local_video <chat_id> <имя_файла> [caption] [topic_id] - Отправить видео\n";
-                $response .= "/send_local_document <chat_id> <имя_файла> [caption] [topic_id] - Отправить документ\n";
-                $response .= "/delete_file <имя_файла> - Удалить файл\n";
-                $response .= "/cleanup_files - Очистить старые файлы\n\n";
+                $response .= "/send_local_photo <chat_id> <file_record_id> [caption] [topic_id] - Отправить фото\n";
+                $response .= "/send_local_video <chat_id> <file_record_id> [caption] [topic_id] - Отправить видео\n";
+                $response .= "/send_local_document <chat_id> <file_record_id> [caption] [topic_id] - Отправить документ\n";
+                $response .= "/delete_file <file_record_id> - Удалить запись файла\n";
+                $response .= "/cleanup_files - Очистить старые записи файлов\n\n";
                 $response .= "*Логи:*\n";
                 $response .= "/logs - Показать последние логи\n";
                 $response .= "/logs_incoming - Показать входящие сообщения\n";
@@ -166,9 +166,9 @@ if (!empty($update) && isset($update['message'])) {
                 $files = $bot->getLocalFiles();
                 
                 if (empty($files)) {
-                    $response = "📁 <b>Сохраненные файлы:</b>\n\nНет сохраненных файлов.\n\nОтправьте файл боту, чтобы он сохранился автоматически.";
+                    $response = "📁 <b>Сохраненные file_id:</b>\n\nНет сохраненных файлов.\n\nОтправьте файл боту, чтобы он сохранился автоматически.";
                 } else {
-                    $response = "📁 <b>Сохраненные файлы:</b>\n\n";
+                    $response = "📁 <b>Сохраненные file_id:</b>\n\n";
                     
                     // Группируем файлы по типам
                     $filesByType = [];
@@ -185,41 +185,41 @@ if (!empty($update) && isset($update['message'])) {
                         $response .= "<b>{$typeName}:</b>\n";
                         foreach ($typeFiles as $file) {
                             // Экранируем HTML-сущности
-                            $fileName = htmlspecialchars($file['name'], ENT_QUOTES | ENT_HTML5, 'UTF-8');
-                            $size = htmlspecialchars($file['size_formatted'], ENT_QUOTES | ENT_HTML5, 'UTF-8');
-                            $response .= "  • <code>{$fileName}</code> ({$size})\n";
+                            $recordId = htmlspecialchars((string)($file['record_id'] ?? ''), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                            $fileId = htmlspecialchars($file['file_id'] ?? '', ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                            $fileName = htmlspecialchars($file['file_name'] ?? 'без имени', ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                            $createdAt = htmlspecialchars($file['created_at'] ?? '', ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                            $response .= "  • ID <code>{$recordId}</code> — {$fileName}\n";
+                            $response .= "    <code>{$fileId}</code>\n";
+                            $response .= "    {$createdAt}\n";
                         }
                         $response .= "\n";
                     }
                     
-                    $response .= "Используйте команды /send_local_* для отправки файлов.";
+                    $response .= "Используйте команды /send_local_* для отправки файлов по ID записи.";
                 }
                 
                 $bot->sendMessage($chatId, $response, 'HTML');
                 break;
             
             case '/send_local_photo':
-                $bot->writeLog("Admin $userId sending local photo", 'INFO');
+                $bot->writeLog("Admin $userId sending photo by stored ID", 'INFO');
                 $parts = explode(' ', $text, 5);
                 if (count($parts) < 3) {
                     $response = "❌ *Неверный формат команды.*\n\n";
                     $response .= "*Использование:*\n";
-                    $response .= "`/send_local_photo <chat_id> <имя_файла> [caption] [topic_id]`\n\n";
-                    $response .= "*Примеры:*\n";
-                    $response .= "`/send_local_photo -100123456789 photo.jpg \"Мое фото\"`\n";
-                    $response .= "`/send_local_photo -100123456789 photo.jpg \"Фото в топик\" 123`\n\n";
+                    $response .= "`/send_local_photo <chat_id> <file_record_id> [caption] [topic_id]`\n\n";
                     $response .= "Используйте `/files` для просмотра доступных файлов.";
                     $bot->sendMessage($chatId, $response, 'Markdown');
                     break;
                 }
-                
+
                 $targetChatId = $parts[1];
-                $fileName = $parts[2];
+                $recordId = $parts[2];
                 $caption = '';
                 $topicId = null;
-                
+
                 if (count($parts) >= 4) {
-                    // Проверяем, является ли 4-й параметр числом (topic_id) или строкой (caption)
                     if (is_numeric($parts[3]) && count($parts) == 4) {
                         $topicId = $parts[3];
                     } else {
@@ -229,19 +229,10 @@ if (!empty($update) && isset($update['message'])) {
                         }
                     }
                 }
-                
-                $filePath = $bot->uploadsDir . '/' . $fileName;
-                
-                if (!file_exists($filePath)) {
-                    $response = "❌ Файл `$fileName` не найден.\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $result = $bot->sendPhotoFromFile($targetChatId, $filePath, $caption, 'Markdown', null, $topicId);
+
+                $result = $bot->sendStoredFileById($targetChatId, $recordId, 'photo', $caption, 'Markdown', null, $topicId);
                 if ($result && isset($result['ok']) && $result['ok']) {
-                    $response = "✅ Фото `$fileName` успешно отправлено в чат `$targetChatId`";
+                    $response = "✅ Фото с ID `$recordId` успешно отправлено в чат `$targetChatId`";
                     if ($topicId) {
                         $response .= " в топик `$topicId`";
                     }
@@ -251,29 +242,25 @@ if (!empty($update) && isset($update['message'])) {
                 }
                 $bot->sendMessage($chatId, $response, 'Markdown');
                 break;
-                
+
             case '/send_local_video':
-                $bot->writeLog("Admin $userId sending local video", 'INFO');
+                $bot->writeLog("Admin $userId sending video by stored ID", 'INFO');
                 $parts = explode(' ', $text, 5);
                 if (count($parts) < 3) {
                     $response = "❌ *Неверный формат команды.*\n\n";
                     $response .= "*Использование:*\n";
-                    $response .= "`/send_local_video <chat_id> <имя_файла> [caption] [topic_id]`\n\n";
-                    $response .= "*Примеры:*\n";
-                    $response .= "`/send_local_video -100123456789 video.mp4 \"Мое видео\"`\n";
-                    $response .= "`/send_local_video -100123456789 video.mp4 \"Видео в топик\" 123`\n\n";
+                    $response .= "`/send_local_video <chat_id> <file_record_id> [caption] [topic_id]`\n\n";
                     $response .= "Используйте `/files` для просмотра доступных файлов.";
                     $bot->sendMessage($chatId, $response, 'Markdown');
                     break;
                 }
-                
+
                 $targetChatId = $parts[1];
-                $fileName = $parts[2];
+                $recordId = $parts[2];
                 $caption = '';
                 $topicId = null;
-                
+
                 if (count($parts) >= 4) {
-                    // Проверяем, является ли 4-й параметр числом (topic_id) или строкой (caption)
                     if (is_numeric($parts[3]) && count($parts) == 4) {
                         $topicId = $parts[3];
                     } else {
@@ -283,19 +270,10 @@ if (!empty($update) && isset($update['message'])) {
                         }
                     }
                 }
-                
-                $filePath = $bot->uploadsDir . '/' . $fileName;
-                
-                if (!file_exists($filePath)) {
-                    $response = "❌ Файл `$fileName` не найден.\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $result = $bot->sendVideoFromFile($targetChatId, $filePath, $caption, 'Markdown', null, $topicId);
+
+                $result = $bot->sendStoredFileById($targetChatId, $recordId, 'video', $caption, 'Markdown', null, $topicId);
                 if ($result && isset($result['ok']) && $result['ok']) {
-                    $response = "✅ Видео `$fileName` успешно отправлено в чат `$targetChatId`";
+                    $response = "✅ Видео с ID `$recordId` успешно отправлено в чат `$targetChatId`";
                     if ($topicId) {
                         $response .= " в топик `$topicId`";
                     }
@@ -305,29 +283,25 @@ if (!empty($update) && isset($update['message'])) {
                 }
                 $bot->sendMessage($chatId, $response, 'Markdown');
                 break;
-                
+
             case '/send_local_document':
-                $bot->writeLog("Admin $userId sending local document", 'INFO');
+                $bot->writeLog("Admin $userId sending document by stored ID", 'INFO');
                 $parts = explode(' ', $text, 5);
                 if (count($parts) < 3) {
                     $response = "❌ *Неверный формат команды.*\n\n";
                     $response .= "*Использование:*\n";
-                    $response .= "`/send_local_document <chat_id> <имя_файла> [caption] [topic_id]`\n\n";
-                    $response .= "*Примеры:*\n";
-                    $response .= "`/send_local_document -100123456789 document.pdf \"Документ\"`\n";
-                    $response .= "`/send_local_document -100123456789 document.pdf \"Документ в топик\" 123`\n\n";
+                    $response .= "`/send_local_document <chat_id> <file_record_id> [caption] [topic_id]`\n\n";
                     $response .= "Используйте `/files` для просмотра доступных файлов.";
                     $bot->sendMessage($chatId, $response, 'Markdown');
                     break;
                 }
-                
+
                 $targetChatId = $parts[1];
-                $fileName = $parts[2];
+                $recordId = $parts[2];
                 $caption = '';
                 $topicId = null;
-                
+
                 if (count($parts) >= 4) {
-                    // Проверяем, является ли 4-й параметр числом (topic_id) или строкой (caption)
                     if (is_numeric($parts[3]) && count($parts) == 4) {
                         $topicId = $parts[3];
                     } else {
@@ -337,19 +311,10 @@ if (!empty($update) && isset($update['message'])) {
                         }
                     }
                 }
-                
-                $filePath = $bot->uploadsDir . '/' . $fileName;
-                
-                if (!file_exists($filePath)) {
-                    $response = "❌ Файл `$fileName` не найден.\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $result = $bot->sendDocumentFromFile($targetChatId, $filePath, $caption, 'Markdown', null, $topicId);
+
+                $result = $bot->sendStoredFileById($targetChatId, $recordId, 'document', $caption, 'Markdown', null, $topicId);
                 if ($result && isset($result['ok']) && $result['ok']) {
-                    $response = "✅ Документ `$fileName` успешно отправлен в чат `$targetChatId`";
+                    $response = "✅ Документ с ID `$recordId` успешно отправлен в чат `$targetChatId`";
                     if ($topicId) {
                         $response .= " в топик `$topicId`";
                     }
@@ -359,29 +324,25 @@ if (!empty($update) && isset($update['message'])) {
                 }
                 $bot->sendMessage($chatId, $response, 'Markdown');
                 break;
-                
+
             case '/send_local_audio':
-                $bot->writeLog("Admin $userId sending local audio", 'INFO');
+                $bot->writeLog("Admin $userId sending audio by stored ID", 'INFO');
                 $parts = explode(' ', $text, 5);
                 if (count($parts) < 3) {
                     $response = "❌ *Неверный формат команды.*\n\n";
                     $response .= "*Использование:*\n";
-                    $response .= "`/send_local_audio <chat_id> <имя_файла> [caption] [topic_id]`\n\n";
-                    $response .= "*Примеры:*\n";
-                    $response .= "`/send_local_audio -100123456789 audio.mp3 \"Музыка\"`\n";
-                    $response .= "`/send_local_audio -100123456789 audio.mp3 \"Аудио в топик\" 123`\n\n";
+                    $response .= "`/send_local_audio <chat_id> <file_record_id> [caption] [topic_id]`\n\n";
                     $response .= "Используйте `/files` для просмотра доступных файлов.";
                     $bot->sendMessage($chatId, $response, 'Markdown');
                     break;
                 }
-                
+
                 $targetChatId = $parts[1];
-                $fileName = $parts[2];
+                $recordId = $parts[2];
                 $caption = '';
                 $topicId = null;
-                
+
                 if (count($parts) >= 4) {
-                    // Проверяем, является ли 4-й параметр числом (topic_id) или строкой (caption)
                     if (is_numeric($parts[3]) && count($parts) == 4) {
                         $topicId = $parts[3];
                     } else {
@@ -391,19 +352,10 @@ if (!empty($update) && isset($update['message'])) {
                         }
                     }
                 }
-                
-                $filePath = $bot->uploadsDir . '/' . $fileName;
-                
-                if (!file_exists($filePath)) {
-                    $response = "❌ Файл `$fileName` не найден.\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $result = $bot->sendAudioFromFile($targetChatId, $filePath, $caption, 'Markdown', null, $topicId);
+
+                $result = $bot->sendStoredFileById($targetChatId, $recordId, 'audio', $caption, 'Markdown', null, $topicId);
                 if ($result && isset($result['ok']) && $result['ok']) {
-                    $response = "✅ Аудио `$fileName` успешно отправлено в чат `$targetChatId`";
+                    $response = "✅ Аудио с ID `$recordId` успешно отправлено в чат `$targetChatId`";
                     if ($topicId) {
                         $response .= " в топик `$topicId`";
                     }
@@ -413,28 +365,28 @@ if (!empty($update) && isset($update['message'])) {
                 }
                 $bot->sendMessage($chatId, $response, 'Markdown');
                 break;
-                
+
             case '/delete_file':
                 $bot->writeLog("Admin $userId deleting file", 'INFO');
                 $parts = explode(' ', $text, 2);
                 if (count($parts) < 2) {
                     $response = "❌ *Неверный формат команды.*\n\n";
                     $response .= "*Использование:*\n";
-                    $response .= "`/delete_file <имя_файла>`\n\n";
+                    $response .= "`/delete_file <file_record_id>`\n\n";
                     $response .= "*Пример:*\n";
-                    $response .= "`/delete_file photo.jpg`\n\n";
+                    $response .= "`/delete_file 12`\n\n";
                     $response .= "Используйте `/files` для просмотра доступных файлов.";
                     $bot->sendMessage($chatId, $response, 'Markdown');
                     break;
                 }
                 
-                $fileName = $parts[1];
+                $recordId = $parts[1];
                 
-                $success = $bot->deleteLocalFile($fileName);
+                $success = $bot->deleteLocalFile($recordId);
                 if ($success) {
-                    $response = "✅ Файл `$fileName` успешно удален.";
+                    $response = "✅ Запись файла `$recordId` успешно удалена.";
                 } else {
-                    $response = "❌ Не удалось удалить файл `$fileName`.";
+                    $response = "❌ Не удалось удалить запись файла `$recordId`.";
                 }
                 $bot->sendMessage($chatId, $response, 'Markdown');
                 break;
@@ -616,19 +568,19 @@ function formatHtmlMessage($text, $escapeHtml = true) {
 function getHelpText() {
     $help = "📚 *Подробная справка по командам бота:*\n\n";
     
-    $help .= "*📁 РАБОТА С ЛОКАЛЬНЫМИ ФАЙЛАМИ*\n";
+    $help .= "*📁 РАБОТА С TELEGRAM FILE_ID*\n";
     $help .= "1. Отправьте файл боту (фото, видео, документ и т.д.)\n";
-    $help .= "2. Бот автоматически сохранит файл\n";
-    $help .= "3. Используйте команды для отправки сохраненных файлов\n\n";
+    $help .= "2. Бот сохранит Telegram file_id (без скачивания файла)\n";
+    $help .= "3. Используйте команды для отправки файлов по ID записи\n\n";
     
     $help .= "*📋 КОМАНДЫ ДЛЯ ФАЙЛОВ:*\n";
-    $help .= "`/files` - Список сохраненных файлов\n";
-    $help .= "`/send_local_photo <chat_id> <файл> [подпись] [topic_id]` - Отправить фото\n";
-    $help .= "`/send_local_video <chat_id> <файл> [подпись] [topic_id]` - Отправить видео\n";
-    $help .= "`/send_local_document <chat_id> <файл> [подпись] [topic_id]` - Отправить документ\n";
-    $help .= "`/send_local_audio <chat_id> <файл> [подпись] [topic_id]` - Отправить аудио\n";
-    $help .= "`/delete_file <файл>` - Удалить файл\n";
-    $help .= "`/cleanup_files [дни]` - Очистить старые файлы\n\n";
+    $help .= "`/files` - Список сохраненных Telegram file_id\n";
+    $help .= "`/send_local_photo <chat_id> <file_record_id> [подпись] [topic_id]` - Отправить фото\n";
+    $help .= "`/send_local_video <chat_id> <file_record_id> [подпись] [topic_id]` - Отправить видео\n";
+    $help .= "`/send_local_document <chat_id> <file_record_id> [подпись] [topic_id]` - Отправить документ\n";
+    $help .= "`/send_local_audio <chat_id> <file_record_id> [подпись] [topic_id]` - Отправить аудио\n";
+    $help .= "`/delete_file <file_record_id>` - Удалить запись файла\n";
+    $help .= "`/cleanup_files [дни]` - Очистить старые записи файлов\n\n";
     
     $help .= "*📝 ОТПРАВКА ТЕКСТА:*\n";
     $help .= "`/send_text <chat_id> <текст> [topic_id]` - Отправить текстовое сообщение\n\n";
@@ -637,9 +589,9 @@ function getHelpText() {
     $help .= "`/files` - показать файлы\n";
     $help .= "`/send_text -100123456789 \"Привет, мир!\"`\n";
     $help .= "`/send_text -100123456789 \"Сообщение в топик\" 123`\n";
-    $help .= "`/send_local_photo -100123456789 photo.jpg \"Мое фото\"`\n";
-    $help .= "`/send_local_photo -100123456789 photo.jpg \"Фото в топик\" 123`\n";
-    $help .= "`/delete_file old_photo.jpg`\n\n";
+    $help .= "`/send_local_photo -100123456789 12 \"Мое фото\"`\n";
+    $help .= "`/send_local_photo -100123456789 12 \"Фото в топик\" 123`\n";
+    $help .= "`/delete_file 12`\n\n";
     
     $help .= "*📊 ОСНОВНЫЕ КОМАНДЫ:*\n";
     $help .= "`/check` - Проверить новые события\n";
