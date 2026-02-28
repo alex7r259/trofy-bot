@@ -1,0 +1,14 @@
+{
+    "name": "telegram/wordpress-event-bot",
+    "description": "Telegram bot for WordPress events",
+    "require": {
+        "php": ">=7.4",
+        "ext-curl": "*",
+        "ext-json": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "TelegramBot\\": "src/"
+        }
+    }
+}
