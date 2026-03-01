@@ -16,6 +16,15 @@ if (DEBUG_MODE && !empty($input)) {
 // ЛОГИРОВАНИЕ: Записываем входящее сообщение
 if (!empty($update)) {
     $bot->logIncomingMessage($update);
+    registerKnownChatAndTopic($update);
+    appendChatAccessLog($update);
+}
+
+if (!empty($update) && isset($update['callback_query'])) {
+    handleComposeCallback($bot, $update['callback_query']);
+    http_response_code(200);
+    echo 'OK';
+    exit;
 }
 
 // Обработка загруженных файлов (для всех пользователей)
@@ -34,7 +43,8 @@ if (!empty($update) && isset($update['message'])) {
             $state = loadComposeState();
             $composeUserId = $fileInfo['user_id'];
             if (isset($state[$composeUserId])) {
-                $state[$composeUserId]['file_path'] = $fileInfo['path'];
+                $state[$composeUserId]['file_id'] = $fileInfo['file_id'];
+                $state[$composeUserId]['file_name'] = $fileInfo['file_name'] ?? '';
                 $state[$composeUserId]['file_type'] = $fileInfo['type'];
                 if (!empty($fileInfo['caption'])) {
                     $state[$composeUserId]['caption'] = $fileInfo['caption'];
@@ -48,7 +58,7 @@ if (!empty($update) && isset($update['message'])) {
                     'Markdown',
                     null,
                     null,
-                    buildComposeKeyboard()
+                    buildComposeKeyboard($state[$composeUserId])
                 );
             }
             // Файл успешно сохранен, дальше обрабатываем как обычно
@@ -116,6 +126,22 @@ if (!empty($update) && isset($update['message'])) {
 
             if ($userCompose && $chatType === 'private') {
                 $normalized = trim($text);
+                if ($normalized === '💬 Чат') {
+                    $keyboard = buildChatSelectionKeyboard($userId);
+                    $bot->sendMessage($chatId, "Выберите чат для отправки:", 'Markdown', null, null, $keyboard);
+                    http_response_code(200);
+                    echo 'OK';
+                    exit;
+                }
+
+                if ($normalized === '🧵 Топик') {
+                    $keyboard = buildTopicSelectionKeyboard($userId, $state[$userId]['chat_id'] ?? null);
+                    $bot->sendMessage($chatId, "Выберите топик для текущего чата:", 'Markdown', null, null, $keyboard);
+                    http_response_code(200);
+                    echo 'OK';
+                    exit;
+                }
+
                 if ($normalized === '📝 Текст') {
                     $state[$userId]['waiting_for'] = 'text';
                     saveComposeState($state);
@@ -144,7 +170,8 @@ if (!empty($update) && isset($update['message'])) {
                 }
 
                 if ($normalized === '🧹 Очистить файл') {
-                    $state[$userId]['file_path'] = '';
+                    $state[$userId]['file_id'] = '';
+                    $state[$userId]['file_name'] = '';
                     $state[$userId]['file_type'] = '';
                     $state[$userId]['caption'] = '';
                     $state[$userId]['waiting_for'] = null;
@@ -243,7 +270,7 @@ if (!empty($update) && isset($update['message'])) {
                 $response .= "/logs - Показать последние логи\n";
                 $response .= "/logs_incoming - Показать входящие сообщения\n";
                 $response .= "/cleanup_logs - Очистить старые логи\n\n";
-                $response .= "/compose <chat_id> [topic_id] - Открыть интерфейс отправки в Telegram\n";
+                $response .= "/compose - Открыть интерфейс отправки и выбрать чат/топик кнопками\n";
                 $response .= "/help - Подробная справка";
 
                 $bot->sendMessage($chatId, $response, 'Markdown');
@@ -253,29 +280,34 @@ if (!empty($update) && isset($update['message'])) {
             case '/compose':
                 $bot->writeLog("Admin $userId opened compose mode", 'INFO');
                 $parts = preg_split('/\s+/', $text);
-                if (count($parts) < 2) {
-                    $response = "❌ Укажите chat_id.\n";
-                    $response .= "Использование: `/compose <chat_id> [topic_id]`";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-
-                $targetChatId = $parts[1];
-                $topicId = isset($parts[2]) && is_numeric($parts[2]) ? (int)$parts[2] : null;
 
                 $state = loadComposeState();
                 $state[$userId] = [
-                    'chat_id' => $targetChatId,
-                    'topic_id' => $topicId,
+                    'chat_id' => null,
+                    'topic_id' => null,
                     'text' => '',
                     'caption' => '',
-                    'file_path' => '',
+                    'file_id' => '',
+                    'file_name' => '',
                     'file_type' => '',
                     'waiting_for' => null
                 ];
+
+                if (isset($parts[1]) && $parts[1] !== '') {
+                    $state[$userId]['chat_id'] = $parts[1];
+                    registerManualChatSelection($parts[1], null);
+                }
+
+                if (isset($parts[2]) && is_numeric($parts[2])) {
+                    $state[$userId]['topic_id'] = (int)$parts[2];
+                    registerManualChatSelection($state[$userId]['chat_id'], (int)$parts[2]);
+                }
+
                 saveComposeState($state);
 
-                $bot->sendMessage($chatId, buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
+                $replyMarkup = buildComposeKeyboard($state[$userId]);
+                $bot->sendMessage($chatId, buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, $replyMarkup);
+                $bot->sendMessage($chatId, "Выберите чат для отправки:", 'Markdown', null, null, buildChatSelectionKeyboard($userId));
                 break;
 
             case '/cancel_compose':
@@ -777,9 +809,20 @@ function saveComposeState($state) {
     file_put_contents(COMPOSE_STATE_FILE, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 }
 
-function buildComposeKeyboard() {
+function buildComposeKeyboard($draft = null) {
+    $chatLabel = '💬 Чат';
+    if (is_array($draft) && !empty($draft['chat_id'])) {
+        $chatLabel .= ': ' . (string)$draft['chat_id'];
+    }
+
+    $topicLabel = '🧵 Топик';
+    if (is_array($draft) && !empty($draft['topic_id'])) {
+        $topicLabel .= ': ' . (string)$draft['topic_id'];
+    }
+
     return [
         'keyboard' => [
+            [['text' => $chatLabel], ['text' => $topicLabel]],
             [['text' => '📝 Текст'], ['text' => '🏷 Подпись']],
             [['text' => '📎 Файл'], ['text' => '🧹 Очистить файл']],
             [['text' => '🚀 Отправить'], ['text' => '❌ Отмена']]
@@ -794,16 +837,25 @@ function buildComposeStatusMessage($draft) {
     $topicId = $draft['topic_id'] ?? null;
     $text = trim((string)($draft['text'] ?? ''));
     $caption = trim((string)($draft['caption'] ?? ''));
-    $filePath = trim((string)($draft['file_path'] ?? ''));
+    $fileId = trim((string)($draft['file_id'] ?? ''));
+    $fileName = trim((string)($draft['file_name'] ?? ''));
 
-    $msg = "✉️ *Режим отправки в Telegram*\n\n";
-    $msg .= "Чат: `{$chatId}`\n";
+    $msg = "✉️ *Режим отправки в Telegram*
+
+";
+    $msg .= "Чат: `{$chatId}`
+";
     if (!empty($topicId)) {
-        $msg .= "Топик: `{$topicId}`\n";
+        $msg .= "Топик: `{$topicId}`
+";
     }
-    $msg .= "Текст: " . ($text !== '' ? '✅' : '❌') . "\n";
-    $msg .= "Файл: " . ($filePath !== '' ? '✅ `'.basename($filePath).'`' : '❌') . "\n";
-    $msg .= "Подпись: " . ($caption !== '' ? '✅' : '❌') . "\n\n";
+    $msg .= "Текст: " . ($text !== '' ? '✅' : '❌') . "
+";
+    $msg .= "Файл: " . ($fileId !== '' ? '✅ `'.($fileName !== '' ? $fileName : $fileId).'`' : '❌') . "
+";
+    $msg .= "Подпись: " . ($caption !== '' ? '✅' : '❌') . "
+
+";
     $msg .= "Используйте кнопки ниже, чтобы заполнить черновик и отправить.";
 
     return $msg;
@@ -814,14 +866,14 @@ function sendComposeDraft($bot, $draft) {
     $topicId = $draft['topic_id'] ?? null;
     $text = trim((string)($draft['text'] ?? ''));
     $caption = trim((string)($draft['caption'] ?? ''));
-    $filePath = trim((string)($draft['file_path'] ?? ''));
+    $fileId = trim((string)($draft['file_id'] ?? ''));
     $fileType = trim((string)($draft['file_type'] ?? ''));
 
     if (empty($chatId)) {
         return ['ok' => false, 'error' => 'Не указан chat_id.'];
     }
 
-    if ($text === '' && $filePath === '') {
+    if ($text === '' && $fileId === '') {
         return ['ok' => false, 'error' => 'Добавьте текст или файл перед отправкой.'];
     }
 
@@ -832,26 +884,25 @@ function sendComposeDraft($bot, $draft) {
         }
     }
 
-    if ($filePath !== '') {
-        if (!file_exists($filePath)) {
-            return ['ok' => false, 'error' => 'Файл из черновика не найден на сервере.'];
-        }
-
+    if ($fileId !== '') {
         switch ($fileType) {
             case 'photo':
-                $sentFile = $bot->sendPhotoFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                $sentFile = $bot->sendPhoto($chatId, $fileId, $caption, 'HTML', null, $topicId);
                 break;
             case 'video':
-                $sentFile = $bot->sendVideoFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                $sentFile = $bot->sendVideo($chatId, $fileId, $caption, 'HTML', null, $topicId);
                 break;
             case 'audio':
-                $sentFile = $bot->sendAudioFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                $sentFile = $bot->sendAudio($chatId, $fileId, $caption, 'HTML', null, $topicId);
                 break;
             case 'voice':
-                $sentFile = $bot->sendVoiceFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                $sentFile = $bot->sendVoice($chatId, $fileId, $caption, 'HTML', null, $topicId);
+                break;
+            case 'sticker':
+                $sentFile = $bot->sendSticker($chatId, $fileId, null, $topicId);
                 break;
             default:
-                $sentFile = $bot->sendDocumentFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                $sentFile = $bot->sendDocument($chatId, $fileId, $caption, 'HTML', null, $topicId);
                 break;
         }
 
@@ -860,7 +911,218 @@ function sendComposeDraft($bot, $draft) {
         }
     }
 
+    registerManualChatSelection($chatId, $topicId);
+
     return ['ok' => true];
+}
+
+function loadChatRegistry() {
+    if (!file_exists(CHAT_REGISTRY_FILE)) {
+        return ['chats' => []];
+    }
+
+    $raw = file_get_contents(CHAT_REGISTRY_FILE);
+    if ($raw === false || trim($raw) === '') {
+        return ['chats' => []];
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded) || !isset($decoded['chats']) || !is_array($decoded['chats'])) {
+        return ['chats' => []];
+    }
+
+    return $decoded;
+}
+
+function saveChatRegistry($registry) {
+    file_put_contents(CHAT_REGISTRY_FILE, json_encode($registry, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+function registerKnownChatAndTopic($update) {
+    $message = $update['message'] ?? null;
+    if (!is_array($message) || !isset($message['chat']['id'])) {
+        return;
+    }
+
+    $chat = $message['chat'];
+    $chatId = (string)$chat['id'];
+    $topicId = isset($message['message_thread_id']) ? (int)$message['message_thread_id'] : null;
+
+    $registry = loadChatRegistry();
+    if (!isset($registry['chats'][$chatId])) {
+        $registry['chats'][$chatId] = [
+            'chat_id' => $chatId,
+            'title' => $chat['title'] ?? ($chat['first_name'] ?? 'Unknown'),
+            'type' => $chat['type'] ?? 'unknown',
+            'username' => $chat['username'] ?? null,
+            'topics' => []
+        ];
+    }
+
+    if ($topicId) {
+        $registry['chats'][$chatId]['topics'][(string)$topicId] = [
+            'topic_id' => $topicId,
+            'last_seen' => date('Y-m-d H:i:s')
+        ];
+    }
+
+    $registry['chats'][$chatId]['last_seen'] = date('Y-m-d H:i:s');
+    saveChatRegistry($registry);
+}
+
+function registerManualChatSelection($chatId, $topicId = null) {
+    if (empty($chatId)) {
+        return;
+    }
+
+    $registry = loadChatRegistry();
+    $chatKey = (string)$chatId;
+    if (!isset($registry['chats'][$chatKey])) {
+        $registry['chats'][$chatKey] = [
+            'chat_id' => $chatKey,
+            'title' => $chatKey,
+            'type' => 'manual',
+            'username' => null,
+            'topics' => []
+        ];
+    }
+
+    if (!empty($topicId)) {
+        $registry['chats'][$chatKey]['topics'][(string)$topicId] = [
+            'topic_id' => (int)$topicId,
+            'last_seen' => date('Y-m-d H:i:s')
+        ];
+    }
+
+    $registry['chats'][$chatKey]['last_seen'] = date('Y-m-d H:i:s');
+    saveChatRegistry($registry);
+}
+
+function buildChatSelectionKeyboard($userId) {
+    $registry = loadChatRegistry();
+    $rows = [];
+
+    foreach ($registry['chats'] as $chat) {
+        $chatId = (string)($chat['chat_id'] ?? '');
+        if ($chatId === '') {
+            continue;
+        }
+        $title = $chat['title'] ?? $chatId;
+        $rows[] = [['text' => '💬 ' . mb_substr($title, 0, 40), 'callback_data' => 'compose_chat:' . $chatId]];
+    }
+
+    if (empty($rows)) {
+        $rows[] = [['text' => 'Нет сохраненных чатов', 'callback_data' => 'compose_noop']];
+    }
+
+    return ['inline_keyboard' => $rows];
+}
+
+function buildTopicSelectionKeyboard($userId, $chatId) {
+    $state = loadComposeState();
+    $selectedChatId = $chatId ?: ($state[$userId]['chat_id'] ?? null);
+    if (empty($selectedChatId)) {
+        return ['inline_keyboard' => [[['text' => 'Сначала выберите чат', 'callback_data' => 'compose_noop']]]];
+    }
+
+    $registry = loadChatRegistry();
+    $topics = $registry['chats'][(string)$selectedChatId]['topics'] ?? [];
+    $rows = [[['text' => 'Без топика', 'callback_data' => 'compose_topic:' . $selectedChatId . ':0']]];
+
+    foreach ($topics as $topic) {
+        $topicId = (int)($topic['topic_id'] ?? 0);
+        if ($topicId <= 0) {
+            continue;
+        }
+        $rows[] = [[
+            'text' => '🧵 ' . $topicId,
+            'callback_data' => 'compose_topic:' . $selectedChatId . ':' . $topicId
+        ]];
+    }
+
+    return ['inline_keyboard' => $rows];
+}
+
+function handleComposeCallback($bot, $callbackQuery) {
+    $data = $callbackQuery['data'] ?? '';
+    $fromId = $callbackQuery['from']['id'] ?? null;
+    $message = $callbackQuery['message'] ?? [];
+    $chatId = $message['chat']['id'] ?? null;
+
+    if (!$fromId || !$chatId) {
+        return;
+    }
+
+    $state = loadComposeState();
+    if (!isset($state[$fromId])) {
+        $state[$fromId] = [
+            'chat_id' => null,
+            'topic_id' => null,
+            'text' => '',
+            'caption' => '',
+            'file_id' => '',
+            'file_name' => '',
+            'file_type' => '',
+            'waiting_for' => null
+        ];
+    }
+
+    if (strpos($data, 'compose_chat:') === 0) {
+        $selectedChat = substr($data, strlen('compose_chat:'));
+        $state[$fromId]['chat_id'] = $selectedChat;
+        $state[$fromId]['topic_id'] = null;
+        registerManualChatSelection($selectedChat, null);
+        saveComposeState($state);
+        $bot->sendMessage($chatId, "✅ Чат выбран.\n\n" . buildComposeStatusMessage($state[$fromId]), 'Markdown', null, null, buildComposeKeyboard($state[$fromId]));
+        return;
+    }
+
+    if (strpos($data, 'compose_topic:') === 0) {
+        $parts = explode(':', $data);
+        $selectedChat = $parts[1] ?? null;
+        $selectedTopic = isset($parts[2]) ? (int)$parts[2] : 0;
+        if ($selectedChat) {
+            $state[$fromId]['chat_id'] = $selectedChat;
+            $state[$fromId]['topic_id'] = $selectedTopic > 0 ? $selectedTopic : null;
+            registerManualChatSelection($selectedChat, $state[$fromId]['topic_id']);
+            saveComposeState($state);
+            $bot->sendMessage($chatId, "✅ Топик обновлен.\n\n" . buildComposeStatusMessage($state[$fromId]), 'Markdown', null, null, buildComposeKeyboard($state[$fromId]));
+        }
+        return;
+    }
+}
+
+function appendChatAccessLog($update) {
+    $message = $update['message'] ?? null;
+    if (!is_array($message) || !isset($message['chat']['id'])) {
+        return;
+    }
+
+    $chatId = (string)$message['chat']['id'];
+    $line = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'chat_id' => $chatId,
+        'topic_id' => $message['message_thread_id'] ?? null,
+        'message_id' => $message['message_id'] ?? null,
+        'user_id' => $message['from']['id'] ?? null,
+        'username' => $message['from']['username'] ?? null,
+        'text' => $message['text'] ?? ($message['caption'] ?? ''),
+        'type' => detectIncomingType($message)
+    ];
+
+    $safeChatId = preg_replace('/[^0-9\-]/', '_', $chatId);
+    $path = rtrim(CHAT_LOG_DIR, '/') . '/chat_' . $safeChatId . '.log';
+    file_put_contents($path, json_encode($line, JSON_UNESCAPED_UNICODE) . PHP_EOL, FILE_APPEND);
+}
+
+function detectIncomingType($message) {
+    $types = ['text', 'photo', 'video', 'audio', 'voice', 'document', 'sticker'];
+    foreach ($types as $type) {
+        if (isset($message[$type])) {
+            return $type;
+        }
+    }
+    return 'other';
 }
 
 function formatHtmlMessage($text, $escapeHtml = true) {
@@ -892,13 +1154,13 @@ function getHelpText() {
     
     $help .= "*📝 ОТПРАВКА ТЕКСТА:*\n";
     $help .= "`/send_text*-*<chat_id>*-*<текст>*-*[topic_id]` - Отправить текстовое сообщение\n";
-    $help .= "`/compose <chat_id> [topic_id]` - Открыть встроенный режим отправки в Telegram\n\n";
+    $help .= "`/compose` - Открыть встроенный режим отправки и выбрать чат/топик кнопками\n\n";
     
     $help .= "*🎯 ПРИМЕРЫ:*\n";
     $help .= "`/files` - показать файлы\n";
     $help .= "`/send_text*-*-100123456789*-*Привет, мир!`\n";
     $help .= "`/send_text*-*-100123456789*-*Сообщение в топик*-*123`\n";
-    $help .= "`/compose -100123456789 123`\n";
+    $help .= "`/compose`\n";
     $help .= "`/send_local_photo -100123456789 photo.jpg \"Мое фото\"`\n";
     $help .= "`/send_local_photo -100123456789 photo.jpg \"Фото в топик\" 123`\n";
     $help .= "`/delete_file old_photo.jpg`\n\n";
