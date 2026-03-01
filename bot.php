@@ -160,6 +160,64 @@ class TelegramEventBot {
         
         return false;
     }
+
+    /**
+     * Сохранение файла из Telegram по file_id
+     */
+    private function saveTelegramFile($fileId, $originalFileName = null) {
+        if (empty($fileId)) {
+            $this->writeLog('saveTelegramFile called with empty file_id', 'ERROR');
+            return false;
+        }
+
+        if (!is_dir($this->uploadsDir) && !mkdir($this->uploadsDir, 0755, true)) {
+            $this->writeLog("Failed to create uploads directory: {$this->uploadsDir}", 'ERROR');
+            return false;
+        }
+
+        $fileResponse = $this->sendTelegramRequest('getFile', ['file_id' => $fileId]);
+        if (!$fileResponse || empty($fileResponse['ok']) || empty($fileResponse['result']['file_path'])) {
+            $this->writeLog('Failed to get file info from Telegram for file_id: ' . $fileId, 'ERROR');
+            return false;
+        }
+
+        $telegramFilePath = $fileResponse['result']['file_path'];
+        $fileUrl = "https://api.telegram.org/file/bot{$this->botToken}/{$telegramFilePath}";
+
+        $sourceName = $originalFileName ?: basename($telegramFilePath);
+        $sourceName = preg_replace('/[^A-Za-z0-9._-]/', '_', $sourceName);
+        if (empty($sourceName) || $sourceName === '.' || $sourceName === '..') {
+            $sourceName = 'telegram_file';
+        }
+
+        $extension = pathinfo($sourceName, PATHINFO_EXTENSION);
+        $baseName = pathinfo($sourceName, PATHINFO_FILENAME);
+        if ($baseName === '') {
+            $baseName = 'telegram_file';
+        }
+
+        $timestamp = date('Ymd_His');
+        $random = substr(md5(uniqid((string) mt_rand(), true)), 0, 8);
+        $finalName = $baseName . '_' . $timestamp . '_' . $random;
+        if (!empty($extension)) {
+            $finalName .= '.' . $extension;
+        }
+
+        $destination = $this->uploadsDir . '/' . $finalName;
+
+        $downloadedData = @file_get_contents($fileUrl);
+        if ($downloadedData === false || $downloadedData === '') {
+            $this->writeLog('Failed to download Telegram file: ' . $fileUrl, 'ERROR');
+            return false;
+        }
+
+        if (file_put_contents($destination, $downloadedData) === false) {
+            $this->writeLog('Failed to save Telegram file to: ' . $destination, 'ERROR');
+            return false;
+        }
+
+        return $destination;
+    }
     
     /**
      * Отправка фото из локального файла (с поддержкой topic_id)
