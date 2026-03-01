@@ -31,6 +31,26 @@ if (!empty($update) && isset($update['message'])) {
         // Сохраняем файл
         $fileInfo = $bot->handleUploadedFile($update);
         if ($fileInfo) {
+            $state = loadComposeState();
+            $composeUserId = $fileInfo['user_id'];
+            if (isset($state[$composeUserId])) {
+                $state[$composeUserId]['file_path'] = $fileInfo['path'];
+                $state[$composeUserId]['file_type'] = $fileInfo['type'];
+                if (!empty($fileInfo['caption'])) {
+                    $state[$composeUserId]['caption'] = $fileInfo['caption'];
+                }
+                $state[$composeUserId]['waiting_for'] = null;
+                saveComposeState($state);
+
+                $bot->sendMessage(
+                    $fileInfo['chat_id'],
+                    "✅ Файл добавлен в черновик.\n\n" . buildComposeStatusMessage($state[$composeUserId]),
+                    'Markdown',
+                    null,
+                    null,
+                    buildComposeKeyboard()
+                );
+            }
             // Файл успешно сохранен, дальше обрабатываем как обычно
         }
     }
@@ -72,7 +92,9 @@ if (!empty($update) && isset($update['message'])) {
             '/send_local_sticker',
             '/delete_file',
             '/cleanup_files',
-            '/send_text'
+            '/send_text',
+            '/compose',
+            '/cancel_compose'
         ];
         
         // Проверяем, является ли сообщение командой
@@ -89,6 +111,102 @@ if (!empty($update) && isset($update['message'])) {
         
         // Если это не известная команда - ИГНОРИРУЕМ
         if (!$isCommand) {
+            $state = loadComposeState();
+            $userCompose = $state[$userId] ?? null;
+
+            if ($userCompose && $chatType === 'private') {
+                $normalized = trim($text);
+                if ($normalized === '📝 Текст') {
+                    $state[$userId]['waiting_for'] = 'text';
+                    saveComposeState($state);
+                    $bot->sendMessage($chatId, "✍️ Отправьте текст следующим сообщением.", 'Markdown', null, null, buildComposeKeyboard());
+                    http_response_code(200);
+                    echo 'OK';
+                    exit;
+                }
+
+                if ($normalized === '🏷 Подпись') {
+                    $state[$userId]['waiting_for'] = 'caption';
+                    saveComposeState($state);
+                    $bot->sendMessage($chatId, "🏷 Отправьте подпись к файлу следующим сообщением.", 'Markdown', null, null, buildComposeKeyboard());
+                    http_response_code(200);
+                    echo 'OK';
+                    exit;
+                }
+
+                if ($normalized === '📎 Файл') {
+                    $state[$userId]['waiting_for'] = 'file';
+                    saveComposeState($state);
+                    $bot->sendMessage($chatId, "📎 Отправьте файл следующим сообщением.", 'Markdown', null, null, buildComposeKeyboard());
+                    http_response_code(200);
+                    echo 'OK';
+                    exit;
+                }
+
+                if ($normalized === '🧹 Очистить файл') {
+                    $state[$userId]['file_path'] = '';
+                    $state[$userId]['file_type'] = '';
+                    $state[$userId]['caption'] = '';
+                    $state[$userId]['waiting_for'] = null;
+                    saveComposeState($state);
+                    $bot->sendMessage($chatId, "🧹 Файл удален из черновика.
+
+" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
+                    http_response_code(200);
+                    echo 'OK';
+                    exit;
+                }
+
+                if ($normalized === '❌ Отмена') {
+                    unset($state[$userId]);
+                    saveComposeState($state);
+                    $bot->sendMessage($chatId, "❌ Режим отправки отменен.");
+                    http_response_code(200);
+                    echo 'OK';
+                    exit;
+                }
+
+                if ($normalized === '🚀 Отправить') {
+                    $sendResult = sendComposeDraft($bot, $state[$userId]);
+                    if ($sendResult['ok']) {
+                        $bot->sendMessage($chatId, "✅ Черновик отправлен.");
+                        unset($state[$userId]);
+                    } else {
+                        $bot->sendMessage($chatId, "❌ " . $sendResult['error'] . "
+
+" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
+                    }
+                    saveComposeState($state);
+                    http_response_code(200);
+                    echo 'OK';
+                    exit;
+                }
+
+                if (($state[$userId]['waiting_for'] ?? null) === 'text' && $normalized !== '') {
+                    $state[$userId]['text'] = $text;
+                    $state[$userId]['waiting_for'] = null;
+                    saveComposeState($state);
+                    $bot->sendMessage($chatId, "✅ Текст сохранен.
+
+" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
+                    http_response_code(200);
+                    echo 'OK';
+                    exit;
+                }
+
+                if (($state[$userId]['waiting_for'] ?? null) === 'caption' && $normalized !== '') {
+                    $state[$userId]['caption'] = $text;
+                    $state[$userId]['waiting_for'] = null;
+                    saveComposeState($state);
+                    $bot->sendMessage($chatId, "✅ Подпись сохранена.
+
+" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
+                    http_response_code(200);
+                    echo 'OK';
+                    exit;
+                }
+            }
+
             // Если это похоже на команду (начинается с /), логируем но не отвечаем
             if (strpos($text, '/') === 0) {
                 $bot->writeLog("Unknown command from admin $userId: $text", 'INFO');
@@ -125,11 +243,48 @@ if (!empty($update) && isset($update['message'])) {
                 $response .= "/logs - Показать последние логи\n";
                 $response .= "/logs_incoming - Показать входящие сообщения\n";
                 $response .= "/cleanup_logs - Очистить старые логи\n\n";
+                $response .= "/compose <chat_id> [topic_id] - Открыть интерфейс отправки в Telegram\n";
                 $response .= "/help - Подробная справка";
+
                 $bot->sendMessage($chatId, $response, 'Markdown');
                 $bot->writeLog("Sent /start response to admin $userId", 'INFO');
                 break;
                 
+            case '/compose':
+                $bot->writeLog("Admin $userId opened compose mode", 'INFO');
+                $parts = preg_split('/\s+/', $text);
+                if (count($parts) < 2) {
+                    $response = "❌ Укажите chat_id.\n";
+                    $response .= "Использование: `/compose <chat_id> [topic_id]`";
+                    $bot->sendMessage($chatId, $response, 'Markdown');
+                    break;
+                }
+
+                $targetChatId = $parts[1];
+                $topicId = isset($parts[2]) && is_numeric($parts[2]) ? (int)$parts[2] : null;
+
+                $state = loadComposeState();
+                $state[$userId] = [
+                    'chat_id' => $targetChatId,
+                    'topic_id' => $topicId,
+                    'text' => '',
+                    'caption' => '',
+                    'file_path' => '',
+                    'file_type' => '',
+                    'waiting_for' => null
+                ];
+                saveComposeState($state);
+
+                $bot->sendMessage($chatId, buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
+                break;
+
+            case '/cancel_compose':
+                $state = loadComposeState();
+                unset($state[$userId]);
+                saveComposeState($state);
+                $bot->sendMessage($chatId, "❌ Режим отправки отменен.");
+                break;
+
             case '/send_text':
                 $bot->writeLog("Admin $userId sending text message", 'INFO');
                 $parts = explode('*-*', $text, 4);
@@ -603,6 +758,111 @@ function getTypeName($type) {
     return isset($names[$type]) ? $names[$type] : ucfirst($type);
 }
 
+
+function loadComposeState() {
+    if (!file_exists(COMPOSE_STATE_FILE)) {
+        return [];
+    }
+
+    $raw = file_get_contents(COMPOSE_STATE_FILE);
+    if ($raw === false || trim($raw) === '') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+function saveComposeState($state) {
+    file_put_contents(COMPOSE_STATE_FILE, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+function buildComposeKeyboard() {
+    return [
+        'keyboard' => [
+            [['text' => '📝 Текст'], ['text' => '🏷 Подпись']],
+            [['text' => '📎 Файл'], ['text' => '🧹 Очистить файл']],
+            [['text' => '🚀 Отправить'], ['text' => '❌ Отмена']]
+        ],
+        'resize_keyboard' => true,
+        'one_time_keyboard' => false
+    ];
+}
+
+function buildComposeStatusMessage($draft) {
+    $chatId = $draft['chat_id'] ?? '-';
+    $topicId = $draft['topic_id'] ?? null;
+    $text = trim((string)($draft['text'] ?? ''));
+    $caption = trim((string)($draft['caption'] ?? ''));
+    $filePath = trim((string)($draft['file_path'] ?? ''));
+
+    $msg = "✉️ *Режим отправки в Telegram*\n\n";
+    $msg .= "Чат: `{$chatId}`\n";
+    if (!empty($topicId)) {
+        $msg .= "Топик: `{$topicId}`\n";
+    }
+    $msg .= "Текст: " . ($text !== '' ? '✅' : '❌') . "\n";
+    $msg .= "Файл: " . ($filePath !== '' ? '✅ `'.basename($filePath).'`' : '❌') . "\n";
+    $msg .= "Подпись: " . ($caption !== '' ? '✅' : '❌') . "\n\n";
+    $msg .= "Используйте кнопки ниже, чтобы заполнить черновик и отправить.";
+
+    return $msg;
+}
+
+function sendComposeDraft($bot, $draft) {
+    $chatId = $draft['chat_id'] ?? null;
+    $topicId = $draft['topic_id'] ?? null;
+    $text = trim((string)($draft['text'] ?? ''));
+    $caption = trim((string)($draft['caption'] ?? ''));
+    $filePath = trim((string)($draft['file_path'] ?? ''));
+    $fileType = trim((string)($draft['file_type'] ?? ''));
+
+    if (empty($chatId)) {
+        return ['ok' => false, 'error' => 'Не указан chat_id.'];
+    }
+
+    if ($text === '' && $filePath === '') {
+        return ['ok' => false, 'error' => 'Добавьте текст или файл перед отправкой.'];
+    }
+
+    if ($text !== '') {
+        $sentText = $bot->sendMessage($chatId, $text, 'HTML', null, $topicId);
+        if (!$sentText || empty($sentText['ok'])) {
+            return ['ok' => false, 'error' => 'Не удалось отправить текст.'];
+        }
+    }
+
+    if ($filePath !== '') {
+        if (!file_exists($filePath)) {
+            return ['ok' => false, 'error' => 'Файл из черновика не найден на сервере.'];
+        }
+
+        switch ($fileType) {
+            case 'photo':
+                $sentFile = $bot->sendPhotoFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                break;
+            case 'video':
+                $sentFile = $bot->sendVideoFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                break;
+            case 'audio':
+                $sentFile = $bot->sendAudioFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                break;
+            case 'voice':
+                $sentFile = $bot->sendVoiceFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                break;
+            default:
+                $sentFile = $bot->sendDocumentFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                break;
+        }
+
+        if (!$sentFile || empty($sentFile['ok'])) {
+            return ['ok' => false, 'error' => 'Не удалось отправить файл.'];
+        }
+    }
+
+    return ['ok' => true];
+}
+
 function formatHtmlMessage($text, $escapeHtml = true) {
     if ($escapeHtml) {
         $text = htmlspecialchars($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
@@ -631,12 +891,14 @@ function getHelpText() {
     $help .= "`/cleanup_files [дни]` - Очистить старые файлы\n\n";
     
     $help .= "*📝 ОТПРАВКА ТЕКСТА:*\n";
-    $help .= "`/send_text <chat_id> <текст> [topic_id]` - Отправить текстовое сообщение\n\n";
+    $help .= "`/send_text*-*<chat_id>*-*<текст>*-*[topic_id]` - Отправить текстовое сообщение\n";
+    $help .= "`/compose <chat_id> [topic_id]` - Открыть встроенный режим отправки в Telegram\n\n";
     
     $help .= "*🎯 ПРИМЕРЫ:*\n";
     $help .= "`/files` - показать файлы\n";
-    $help .= "`/send_text -100123456789 \"Привет, мир!\"`\n";
-    $help .= "`/send_text -100123456789 \"Сообщение в топик\" 123`\n";
+    $help .= "`/send_text*-*-100123456789*-*Привет, мир!`\n";
+    $help .= "`/send_text*-*-100123456789*-*Сообщение в топик*-*123`\n";
+    $help .= "`/compose -100123456789 123`\n";
     $help .= "`/send_local_photo -100123456789 photo.jpg \"Мое фото\"`\n";
     $help .= "`/send_local_photo -100123456789 photo.jpg \"Фото в топик\" 123`\n";
     $help .= "`/delete_file old_photo.jpg`\n\n";

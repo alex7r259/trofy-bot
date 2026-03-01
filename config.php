@@ -38,4 +38,7 @@ date_default_timezone_set(TIMEZONE);
 
 // Включение отладки
 define('DEBUG_MODE', true);
+
+// Состояние встроенного интерфейса отправки (в Telegram)
+define('COMPOSE_STATE_FILE', __DIR__ . '/compose_state.json');
 ?>
