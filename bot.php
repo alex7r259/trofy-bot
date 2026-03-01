@@ -441,7 +441,7 @@ class TelegramEventBot {
     /**
      * Отправка текстового сообщения в чат (с поддержкой topic_id)
      */
-    public function sendMessage($chatId, $message, $parseMode = 'HTML', $replyToMessageId = null, $topicId = null) {
+    public function sendMessage($chatId, $message, $parseMode = 'HTML', $replyToMessageId = null, $topicId = null, $replyMarkup = null) {
         $params = [
             'chat_id' => $chatId,
             'text' => $message,
@@ -455,6 +455,10 @@ class TelegramEventBot {
         
         if ($topicId) {
             $params['message_thread_id'] = $topicId;
+        }
+
+        if ($replyMarkup) {
+            $params['reply_markup'] = json_encode($replyMarkup, JSON_UNESCAPED_UNICODE);
         }
         
         return $this->sendTelegramRequest('sendMessage', $params);
