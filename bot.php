@@ -108,12 +108,14 @@ class TelegramEventBot {
             $photos = $message['photo'];
             $photo = end($photos);
             $fileId = $photo['file_id'];
+            $fileUniqueId = $photo['file_unique_id'] ?? null;
             $fileType = 'photo';
             $caption = $message['caption'] ?? '';
         } elseif (isset($message['document'])) {
             // Документ
             $document = $message['document'];
             $fileId = $document['file_id'];
+            $fileUniqueId = $document['file_unique_id'] ?? null;
             $fileName = $document['file_name'] ?? 'document';
             $fileType = 'document';
             $caption = $message['caption'] ?? '';
@@ -121,18 +123,21 @@ class TelegramEventBot {
             // Видео
             $video = $message['video'];
             $fileId = $video['file_id'];
+            $fileUniqueId = $video['file_unique_id'] ?? null;
             $fileType = 'video';
             $caption = $message['caption'] ?? '';
         } elseif (isset($message['audio'])) {
             // Аудио
             $audio = $message['audio'];
             $fileId = $audio['file_id'];
+            $fileUniqueId = $audio['file_unique_id'] ?? null;
             $fileType = 'audio';
             $caption = $message['caption'] ?? '';
         } elseif (isset($message['voice'])) {
             // Голосовое сообщение
             $voice = $message['voice'];
             $fileId = $voice['file_id'];
+            $fileUniqueId = $voice['file_unique_id'] ?? null;
             $fileType = 'voice';
             $caption = '';
         } else {
@@ -142,7 +147,7 @@ class TelegramEventBot {
         // Сохраняем только ссылку на Telegram file_id (без скачивания)
         $savedFile = $this->saveTelegramFileReference([
             'file_id' => $fileId,
-            'file_unique_id' => $photo['file_unique_id'] ?? $document['file_unique_id'] ?? $video['file_unique_id'] ?? $audio['file_unique_id'] ?? $voice['file_unique_id'] ?? null,
+            'file_unique_id' => $fileUniqueId ?? null,
             'file_name' => $fileName ?? null,
             'type' => $fileType,
             'caption' => $caption,
@@ -1475,6 +1480,26 @@ public function getLocalFiles() {
 /**
  * Сохранение ссылки на Telegram-файл
  */
+
+/**
+ * Backward-compatible stub for legacy calls that used to download files.
+ * Now stores Telegram file reference only.
+ */
+private function saveTelegramFile($fileId, $fileName = null) {
+    $record = $this->saveTelegramFileReference([
+        'file_id' => $fileId,
+        'file_name' => $fileName,
+        'type' => $this->detectFileType($fileName ?? 'document'),
+        'caption' => '',
+        'chat_id' => null,
+        'user_id' => null,
+        'user_name' => null
+    ]);
+
+    // Historical callers expected string path or false.
+    return $record ? ($record['record_id'] ?? false) : false;
+}
+
 private function saveTelegramFileReference($fileData) {
     $files = $this->loadStoredFiles();
 
